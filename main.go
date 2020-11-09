@@ -85,8 +85,10 @@ type Subscription struct {
 
 // LiveMessage blah
 type LiveMessage struct {
-	Type string `json:"TYPE"`
-	Data json.RawMessage
+	Type    string `json:"TYPE"`
+	Message string `json:"MESSAGE,omitempty"`
+	Info    string `json:"INFO,omitempty"`
+	Data    json.RawMessage
 }
 
 // Time transforms CryptoCompareLiveTimestamp to a time.Time type
@@ -109,6 +111,7 @@ func (p *CryptoCompareLiveTimestamp) UnmarshalJSON(b []byte) error {
 	return nil
 }
 
+// OrderbookMessage is a message of an orderbook subscription received through websockets
 type OrderbookMessage struct {
 	Type       string                     `json:"TYPE"`
 	M          string                     `json:"M"`
@@ -124,8 +127,10 @@ type OrderbookMessage struct {
 	DELAYNS    CryptoCompareLiveTimestamp `json:"DELAYNS"`
 }
 
+// Positions is a map used to store positions we get from the orderbook
 type Positions map[float64]float64
 
+// Report structure used to generated the orderbook report
 type Report struct {
 	BID10            Positions
 	ASK10            Positions
@@ -134,58 +139,52 @@ type Report struct {
 	Title            string
 }
 
-// Print blah
-func (r Report) Print() {
-	keys := make([]float64, 0, len(r.BID10))
-	for k := range r.BID10 {
+// Clear clears the maps from the order book
+func (r Report) Clear() {
+	r.BID10 = make(Positions)
+	r.ASK10 = make(Positions)
+	r.LastAskPositions = make(Positions)
+	r.LastBidPositions = make(Positions)
+}
+
+// PrintTable prints a Bid or ask report into the terminal
+func PrintTable(positions, lastPositions Positions, title, side string) float64 {
+	keys := make([]float64, 0, len(positions))
+	for k := range positions {
 		keys = append(keys, k)
 	}
 	sort.Float64s(keys)
 
 	table := tablewriter.NewWriter(os.Stdout)
-	bidHeader := []string{r.Title}
-	bidLine := []string{"BIDs"}
-	meanBid := 0.0
-	totalVid := 0.0
+	header := []string{fmt.Sprintf("%v %v Price", side, title)}
+	line := []string{"Volume"}
+	volume := []string{"Last Volume"}
+	mean := 0.0
+	total := 0.0
 
 	for _, v := range keys {
-		bidHeader = append(bidHeader, fmt.Sprintf("%.10f", v))
-		bidLine = append(bidLine, fmt.Sprintf("%f", r.BID10[v]))
-		meanBid += v * r.BID10[v]
-		totalVid += r.BID10[v]
+		header = append(header, fmt.Sprintf("%.10f", v))
+		line = append(line, fmt.Sprintf("%v", positions[v]))
+		volume = append(volume, fmt.Sprintf("%v", lastPositions[v]))
+		mean += v * positions[v]
+		total += positions[v]
 	}
-	meanBid = meanBid / totalVid
-	bidHeader = append(bidHeader, "Mean")
-	bidLine = append(bidLine, fmt.Sprintf("%f", meanBid))
-	table.SetHeader(bidHeader)
-	table.Append(bidLine)
+	mean = mean / total
+	header = append(header, "Mean")
+	line = append(line, fmt.Sprintf("%f", mean))
+	table.SetHeader(header)
+	table.Append(line)
+	table.Append(volume)
 	table.Render()
+	return mean
+}
 
-	keys = make([]float64, 0, len(r.ASK10))
-	meanAsk := 0.0
-	totalAsked := 0.0
-	for k := range r.ASK10 {
-		keys = append(keys, k)
-	}
-	sort.Float64s(keys)
+// Print prints a report of the last 15 seconds
+func (r Report) Print() {
 
-	table2 := tablewriter.NewWriter(os.Stdout)
-	askHeader := []string{r.Title}
-	askLine := []string{"ASks"}
+	meanBid := PrintTable(r.BID10, r.LastBidPositions, r.Title, "BID")
 
-	for _, v := range keys {
-		askHeader = append(askHeader, fmt.Sprintf("%.10f", v))
-		askLine = append(askLine, fmt.Sprintf("%f", r.ASK10[v]))
-		meanAsk += v * r.ASK10[v]
-		totalAsked += r.ASK10[v]
-	}
-	meanAsk = meanAsk / totalAsked
-	askHeader = append(askHeader, "Mean")
-	askLine = append(askLine, fmt.Sprintf("%f", meanAsk))
-	table2.SetHeader(askHeader)
-	table2.Append(askLine)
-	table2.Render()
-
+	meanAsk := PrintTable(r.ASK10, r.LastAskPositions, r.Title, "ASK")
 	log.Printf("The current mid price for %v is %.10f\n", r.Title, (meanAsk+meanBid)/2.0)
 }
 
@@ -250,10 +249,16 @@ func main() {
 
 	randomSource := rand.NewSource(time.Now().UnixNano())
 	randomGeneration := rand.New(randomSource)
+
+	log.Println("Selecting two random pais")
 	p1 := pairs[randomGeneration.Intn(len(pairs))]
 	p2 := pairs[randomGeneration.Intn(len(pairs))]
 
+	log.Println("Selected " + fmt.Sprintf("%v -> %v", p1.ExchangeFSym, p1.ExchangeTSym))
+	log.Println("Selected " + fmt.Sprintf("%v -> %v", p2.ExchangeFSym, p2.ExchangeTSym))
+
 	subs := Subscription{Action: "SubAdd", Subscriptions: []string{p1.ToSubscriptionString(), p2.ToSubscriptionString()}}
+	// subs := Subscription{Action: "SubAdd", Subscriptions: []string{"8~Binance~BBB~AAA"}} should trigger 500
 	subData, err := json.Marshal(subs)
 	if err != nil {
 		log.Fatalf(err.Error())
@@ -271,8 +276,8 @@ func main() {
 	reportsFirstPair := make(chan OrderbookMessage)
 	reportsSecondPair := make(chan OrderbookMessage)
 	go func() {
-		report1 := Report{BID10: make(Positions), ASK10: make(Positions), Title: fmt.Sprintf("%v -> %v", p1.ExchangeFSym, p1.ExchangeTSym)}
-		report2 := Report{BID10: make(Positions), ASK10: make(Positions), Title: fmt.Sprintf("%v -> %v", p2.ExchangeFSym, p2.ExchangeTSym)}
+		report1 := Report{BID10: make(Positions), ASK10: make(Positions), Title: fmt.Sprintf("%v -> %v", p1.ExchangeFSym, p1.ExchangeTSym), LastAskPositions: make(Positions), LastBidPositions: make(Positions)}
+		report2 := Report{BID10: make(Positions), ASK10: make(Positions), Title: fmt.Sprintf("%v -> %v", p2.ExchangeFSym, p2.ExchangeTSym), LastAskPositions: make(Positions), LastBidPositions: make(Positions)}
 		defer close(reportsFirstPair)
 		defer close(reportsSecondPair)
 		var reportTicker *time.Ticker
@@ -292,31 +297,34 @@ func main() {
 
 		for {
 			select {
-			case <-interrupt:
-				log.Println("interrupt")
-				return
 			case book := <-reportsFirstPair:
 				{
 					if book.Side == 0 {
 						report1.BID10.InsertAndKeep10(book)
+						report1.LastBidPositions[book.P] = book.Q
 					} else {
 						report1.ASK10.InsertAndKeep10(book)
+						report1.LastAskPositions[book.P] = book.Q
 					}
 				}
 				break
-			case book2 := <-reportsFirstPair:
+			case book2 := <-reportsSecondPair:
 				{
 					if book2.Side == 0 {
 						report2.BID10.InsertAndKeep10(book2)
+						report2.LastBidPositions[book2.P] = book2.Q
 					} else {
 						report2.ASK10.InsertAndKeep10(book2)
+						report2.LastAskPositions[book2.P] = book2.Q
 					}
 				}
 				break
 			case <-reportTicker.C:
 				reportTicker = time.NewTicker(15 * time.Second)
 				report1.Print()
-
+				report2.Print()
+				report1.Clear()
+				report2.Clear()
 			}
 
 		}
@@ -337,8 +345,16 @@ func main() {
 				log.Printf("Error while decoding message %v", err)
 				return
 			}
-			log.Printf("recv: %s", message)
 			switch messageData.Type {
+			case "500":
+				log.Fatalf("Error %v %v\n", messageData.Message, messageData.Info)
+				break
+			case "401":
+				log.Fatalf("Error %v %v\n", messageData.Message, messageData.Info)
+				break
+			case "429":
+				log.Fatalf("Error %v %v\n", messageData.Message, messageData.Info)
+				break
 			case "999":
 				protectLastHeartbeat.Lock()
 				lastReceived = time.Now()
@@ -354,21 +370,20 @@ func main() {
 				}
 				break
 			case "8":
-				book := OrderbookMessage{}
-				err = json.Unmarshal(message, &book)
+				b := OrderbookMessage{}
+				err = json.Unmarshal(message, &b)
 				if err != nil {
 					log.Printf("Error while decoding message %v", err)
 					return
 				}
-				if book.FSym == p1.ExchangeFSym && book.TSym == p1.ExchangeTSym {
-					reportsFirstPair <- book
+				if b.FSym == p1.ExchangeFSym && b.TSym == p1.ExchangeTSym {
+					reportsFirstPair <- b
 				}
-				if book.FSym == p2.ExchangeFSym && book.TSym == p2.ExchangeTSym {
-					reportsSecondPair <- book
+				if b.FSym == p2.ExchangeFSym && b.TSym == p2.ExchangeTSym {
+					reportsSecondPair <- b
 				}
 				break
 			default:
-				log.Println(fmt.Sprintf("Received other message %v", messageData.Type))
 				break
 			}
 		}
@@ -397,9 +412,6 @@ func main() {
 			}()
 		case <-interrupt:
 			log.Println("interrupt")
-
-			// Cleanly close the connection by sending a close message and then
-			// waiting (with timeout) for the server to close the connection.
 			err := connection.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
 			if err != nil {
 				log.Println("write close:", err)
